@@ -1,331 +1,285 @@
--- zerosuite rivals v2 · Velocity / Xeno · endurecido
--- imprime status antes de tocar em Drawing; GUI em xpcall; aim/esp sobrevivem sem GUI
+-- Configurações Principais
+local Settings = {
+    -- O que é ativado?
+    AimbotEnabled = true,
+    EspEnabled = true,
+    SpeedEnabled = false, -- Speed é o mais perigoso, use com moderação
+    SpeedMultiplier = 1.5,
+    AimbotSmoothness = 0.15, -- Valor baixo = mais suave (mais humano)
+    EspColor = Color3.fromRGB(255, 50, 50),
+    AimbotDistance = 200,
+    MouseSensitivity = 0.01 -- Ajuste para o seu mouse
+}
 
-local Players    = game:GetService("Players")
+-- Variáveis Globais
+local Player = game.Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local HumanoidRootPart = Character:FindFirstChildWhichIsA("HumanoidRootPart")
+local Humanoid = Character:FindFirstChildWhichIsA("Humanoid")
+local Mouse = Player:GetMouse()
 local RunService = game:GetService("RunService")
-local Workspace  = game:GetService("Workspace")
-local UIS        = game:GetService("UserInputService")
 
-local LP  = Players.LocalPlayer
-local Cam = Workspace.CurrentCamera
+-- Armazena o último input do mouse para humanizar
+local LastMousePosition = Vector2.new(0, 0)
+local Camera = workspace.CurrentCamera
 
-local genv = getgenv or function() return _G end
-local function iround(v) return math.floor(v + 0.5) end
-local function clamp(v, a, b) if v < a then return a elseif v > b then return b end return v end
+-- ==========================================
+-- SISTEMA DE PAINEL (UI)
+-- ==========================================
+local UIService = game:GetService("UserInputService")
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AimbotMenu"
+ScreenGui.Parent = Player.PlayerGui
 
--- ============================================================ status primeiro
+-- Criar Frame do Painel
+local PanelFrame = Instance.new("Frame")
+PanelFrame.Size = UDim2.new(0, 250, 0, 500)
+PanelFrame.Position = UDim2.new(0, 20, 0, 20)
+PanelFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+PanelFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
+PanelFrame.BorderSizePixel = 0
+PanelFrame.BackgroundTransparency = 0
+PanelFrame.Name = "MainPanel"
+PanelFrame.Parent = ScreenGui
 
-local EXEC = "?"
-pcall(function() if identifyexecutor then EXEC = identifyexecutor() end end)
-local HAS_DRAW = (typeof(Drawing) == "table") and (Drawing.new ~= nil)
+-- Título
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundTransparency = 1
+Title.Text = "⚔️ FLOW BOT PANEL ⚔️"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.GothamBold
+Title.Size = UDim2.new(1, -10, 0, 30)
+Title.Position = UDim2.new(0, 5, 0, 5)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = PanelFrame
 
-local function log(...)
-    local ok, s = pcall(function()
-        local parts = {}
-        for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
-        return table.concat(parts, " ")
-    end)
-    print("[zerosuite] " .. (ok and s or "?"))
-end
+-- Função para criar caixas de toggle/numberinput
+local function createControl(name, type, defaultValue, label, color)
+    local Container = Instance.new("Frame")
+    Container.Size = UDim2.new(1, -20, 0, 40)
+    Container.Position = UDim2.new(0, 0, 0, 10)
+    Container.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    Container.BorderSizePixel = 0
+    Container.Parent = PanelFrame
 
-log("carregando ·", EXEC, "· drawing =", tostring(HAS_DRAW))
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, 0, 1, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = label
+    Label.TextColor3 = color
+    Label.Font = Enum.Font.Gotham
+    Label.Parent = Container
 
-local CFG = {
-    aim = true, aim_key = Enum.KeyCode.E, aim_part = "Head",
-    fov = 130, smooth = 0.22, prediction = 0.045, aim_range = 450,
-    visible_only = true, team_check = true, jitter = 0.0,
-    esp = true, box = true, name = true, health = true, distance = true,
-    tracer = false, head_dot = true, skeleton = false,
-    esp_range = 500, esp_limit = 30, fov_circle = true,
-    menu_key = Enum.KeyCode.RightShift, panic_key = Enum.KeyCode.F8,
-}
-local Stats = { fps = 0, target = "-" }
-
--- ============================================================ players
-
-local SKELETON = {
-    R6  = { {"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"Torso","Left Leg"},{"Torso","Right Leg"} },
-    R15 = { {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
-            {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},
-            {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},
-            {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},
-            {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"} },
-}
-
-local recs = {}
-
-local function build(p)
-    local rec = recs[p]
-    if not rec then
-        rec = { lines = {} }
-        recs[p] = rec
+    if type == "Toggle" then
+        local Toggle = Instance.new("TextButton")
+        Toggle.Size = UDim2.new(1, -20, 0, 25)
+        Toggle.Position = UDim2.new(0, 20, 0, 5)
+        Toggle.BackgroundColor3 = defaultValue and Color3.fromRGB(50, 200, 100) or Color3.fromRGB(100, 100, 100)
+        Toggle.Text = "ON"
+        Toggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+        Toggle.Parent = Container
+        
+        -- Conectar ao Toggle
+        Container.Name = name
+        Container.DefaultValue = defaultValue
+        Container.Selected = defaultValue
+        
+        local function UpdateToggle(value)
+            Container.BackgroundColor3 = value and Color3.fromRGB(50, 200, 100) or Color3.fromRGB(100, 100, 100)
+            Container.Text = value and "ON" or "OFF"
+        end
+        Toggle.MouseButton1Click:Connect(function()
+            Container.Selected = not Container.Selected
+            UpdateToggle(Container.Selected)
+            Settings[name .. "Enabled"] = Container.Selected
+        end)
+        
+        return Container
+    elseif type == "NumberInput" then
+        local Number = Instance.new("NumberInput")
+        Number.Position = UDim2.new(0, 20, 0, 10)
+        Number.Size = UDim2.new(1, -20, 1, 0)
+        Number.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+        Number.Text = tostring(defaultValue)
+        Number.Font = Enum.Font.Gotham
+        Number.Parent = Container
+        Container.Name = name
+        Number.TextChanged:Connect(function()
+            Settings[name .. "Value"] = Number.Value
+        end)
+        return Container
     end
-    rec.parts = nil
-    local char = p.Character
-    if not char then return rec end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local root = char:FindFirstChild("HumanoidRootPart")
-    local head = char:FindFirstChild("Head")
-    if not (hum and root and head) then return rec end
+end
 
-    local set = char:FindFirstChild("UpperTorso") and SKELETON.R15 or SKELETON.R6
-    local bones = {}
-    for _, pair in ipairs(set) do
-        local a, b = char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2])
-        if a and b then bones[#bones + 1] = { a, b } end
+-- Criar Controles no Painel
+local AimbotBox = createControl("Aimbot", "Toggle", Settings.AimbotEnabled, "Aimbot", Color3.fromRGB(255, 255, 255))
+local EspBox = createControl("Esp", "Toggle", Settings.EspEnabled, "Esp", Color3.fromRGB(255, 255, 255))
+local SpeedBox = createControl("Speed", "Toggle", Settings.SpeedEnabled, "Speed (Risco!)", Color3.fromRGB(255, 215, 0))
+
+-- Input de Sensibilidade
+local Sensitivity = Instance.new("Frame")
+Sensitivity.Size = UDim2.new(1, -20, 0, 40)
+Sensitivity.Position = UDim2.new(0, 0, 0, 60)
+Sensitivity.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+Sensitivity.BorderSizePixel = 0
+Sensitivity.Parent = PanelFrame
+
+local SensLabel = Instance.new("TextLabel")
+SensLabel.Size = UDim2.new(1, 0, 1, 0)
+SensLabel.BackgroundTransparency = 1
+SensLabel.Text = "Mouse Sensitivity:"
+SensLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+SensLabel.Font = Enum.Font.Gotham
+SensLabel.Parent = Sensitivity
+
+local SensNumber = Instance.new("NumberInput")
+SensNumber.Position = UDim2.new(0, 10, 0, 5)
+SensNumber.Size = UDim2.new(1, -10, 1, 0)
+SensNumber.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+SensNumber.Text = tostring(Settings.MouseSensitivity)
+SensNumber.Font = Enum.Font.Gotham
+SensNumber.Parent = Sensitivity
+SensNumber.Name = "SensitivityInput"
+
+SensNumber.TextChanged:Connect(function()
+    Settings.MouseSensitivity = SensNumber.Value
+end)
+
+
+-- ==========================================
+-- LÓGICA DO AIMBOT
+-- ==========================================
+local function GetNearestEnemy()
+    local enemies = workspace:FindFirstChild("Enemies") or {} -- Ajuste conforme a estrutura do jogo (ex: Teams)
+    if not enemies then return end
+    
+    local Root = HumanoidRootPart.Position
+    local NearestPos = nil
+    local MinDistance = Settings.AimbotDistance
+    
+    for _, enemy in ipairs(enemies:GetChildren()) do
+        local EnemyRoot = enemy:FindFirstChildWhichIsA("HumanoidRootPart")
+        if EnemyRoot then
+            local Dist = Root:DistanceTo(EnemyRoot.Position)
+            if Dist < MinDistance then
+                MinDistance = Dist
+                NearestPos = EnemyRoot.Position
+            end
+        end
     end
-    rec.parts = { char = char, hum = hum, root = root, head = head, bones = bones }
-    rec.label = (p.DisplayName ~= p.Name) and p.DisplayName or p.Name
-    return rec
-end
-
-local function bind(p)
-    local rec = build(p)
-    if rec.ca then rec.ca:Disconnect() end
-    if rec.cr then rec.cr:Disconnect() end
-    rec.ca = p.CharacterAdded:Connect(function() task.defer(function() build(p) end) end)
-    rec.cr = p.CharacterRemoving:Connect(function() rec.parts = nil end)
-end
-
-for _, p in ipairs(Players:GetPlayers()) do bind(p) end
-Players.PlayerAdded:Connect(bind)
-Players.PlayerRemoving:Connect(function(p) recs[p] = nil end)
-
-local function my_root()
-    local c = LP.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-
-local function same_team(p)
-    if not CFG.team_check or not LP.Team then return false end
-    return p.Team == LP.Team
-end
-
-local function project(pos)
-    if not Cam then return nil end
-    local s = Cam:WorldToViewportPoint(pos)
-    if s.Z <= 0 then return nil end
-    return s.X, s.Y
-end
-
--- ============================================================ aim
-
-local ray = RaycastParams.new()
-ray.IgnoreWater = true
-pcall(function() ray.FilterType = Enum.RaycastFilterType.Exclude end)
-local rayf = { nil, nil }
-ray.FilterDescendantsInstances = rayf
-
-local function aim_part(rec)
-    local parts = rec.parts
-    if not parts then return nil end
-    local p = parts.char:FindFirstChild(CFG.aim_part)
-    if p and p:IsA("BasePart") then return p end
-    return parts.head
-end
-
-local function pick()
-    if not Cam then return nil end
-    local root = my_root()
-    if not root then return nil end
-    local vp = Cam.ViewportSize
-    local cx, cy = vp.X * 0.5, vp.Y * 0.5
-    local campos = Cam.CFrame.Position
-    local look = Cam.CFrame.LookVector
-    local best, best_d2 = nil, CFG.fov * CFG.fov
-
-    for p, rec in pairs(recs) do
-        local parts = rec.parts
-        if p ~= LP and parts and parts.hum and parts.hum.Health > 0 and not same_team(p) then
-            local part = aim_part(rec)
-            if part then
-                local delta = part.Position - campos
-                local dist = delta.Magnitude
-                if dist > 4 and dist <= CFG.aim_range and delta.Unit:Dot(look) > 0.15 then
-                    local sx, sy = project(part.Position)
-                    if sx then
-                        local dx, dy = sx - cx, sy - cy
-                        local d2 = dx * dx + dy * dy
-                        if d2 < best_d2 then
-                            best_d2 = d2
-                            best = { part = part, rec = rec, p = p }
-                        end
-                    end
+    
+    -- Se o jogo for baseado em Teams ou Partes soltas
+    local AllParts = workspace:GetChildren()
+    for _, part in ipairs(AllParts) do
+        if part:IsA("BasePart") and part.Parent ~= workspace and part.Parent.Parent ~= HumanoidRootPart then
+            -- Verifica se a part é um inimigo (ex: tem Humanoid ou cor vermelha)
+            if part.Parent.Parent and part.Parent.Parent:FindFirstChildWhichIsA("Humanoid") then
+                local Dist = Root:DistanceTo(part.Position)
+                if Dist < MinDistance and not (part.Parent.Parent == Player.Character) then
+                    MinDistance = Dist
+                    NearestPos = part.Position
                 end
             end
         end
     end
-    return best
+    
+    return NearestPos
 end
 
-local function aim_step(dt)
-    if not CFG.aim or not Cam then Stats.target = "-" return end
-    if not UIS:IsKeyDown(CFG.aim_key) then Stats.target = "-" return end
+-- Lógica de MouseHumanize (Para parecer que você está jogando)
+local function HumanizeMouse(targetPos)
+    local Target = Camera:WorldToViewportPoint(targetPos)
+    local Delta = Target - Mouse.Position
+    
+    -- Curva de movimento suave (Lerp simples para suavizar)
+    local NewPosition = Mouse.Position + (Delta * Settings.AimbotSmoothness)
+    return NewPosition
+end
 
-    local t = pick()
-    if not t then Stats.target = "-" return end
-
-    local campos = Cam.CFrame.Position
-    if CFG.visible_only then
-        rayf[1] = LP.Character
-        rayf[2] = t.rec.parts.char
-        if Workspace:Raycast(campos, t.part.Position - campos, ray) then
-            Stats.target = "-"
-            return
+local function ApplyAimbot()
+    local TargetPos = GetNearestEnemy()
+    if TargetPos then
+        local Target = Camera:WorldToViewportPoint(TargetPos)
+        
+        if TargetPos and Target then
+            -- Aplica o movimento suave
+            Mouse.Position = HumanizeMouse(TargetPos)
         end
     end
-
-    Stats.target = t.rec.label or t.p.Name
-
-    local pos = t.part.Position
-    if CFG.prediction > 0 then
-        pos = pos + (t.part.AssemblyLinearVelocity or Vector3.zero) * CFG.prediction
-    end
-
-    local alpha = 1 - math.exp(-dt / math.max(0.004, CFG.smooth))
-    local desired = CFrame.lookAt(campos, pos)
-    if CFG.jitter > 0 then
-        local j = math.rad(CFG.jitter)
-        desired = desired * CFrame.Angles((math.random() - 0.5) * j, (math.random() - 0.5) * j, 0)
-    end
-    Cam.CFrame = Cam.CFrame:Lerp(desired, alpha)
 end
 
-RunService.RenderStepped:Connect(function(dt)
-    pcall(aim_step, dt)
-    for p, rec in pairs(recs) do
-        if not rec.parts and p.Character then build(p) end
+-- ==========================================
+-- LÓGICA DO ESP
+-- ==========================================
+local function DrawEsp()
+    local parts = workspace:GetDescendants()
+    
+    for _, part in ipairs(parts) do
+        if part:IsA("BasePart") and part.Parent and part.Parent.Parent ~= workspace and part.Parent.Parent ~= HumanoidRootPart then
+            -- Desenha caixas ao redor dos inimigos
+            local Size = part.Size
+            local Pos = part.Position
+            
+            -- Verifica se é inimigo (excluindo aliados ou o próprio)
+            if part.Parent.Parent ~= Player.Character then
+                local ScreenX, ScreenY = Camera:WorldToViewportPoint(Pos)
+                local ScreenSize = Camera:WorldToViewportSize(Size)
+                
+                -- Só desenha se estiver na tela
+                if ScreenX > 0 and ScreenX < Camera.ViewSizeX and ScreenY > 0 and ScreenY < Camera.ViewSizeY then
+                    local Box = Instance.new("Frame")
+                    Box.Size = UDim2.new(0, ScreenSize.X * 2, 0, ScreenSize.Y * 2)
+                    Box.Position = UDim2.new(0, ScreenX - (ScreenSize.X), 0, ScreenY - (ScreenSize.Y))
+                    Box.BackgroundColor3 = Settings.EspColor
+                    Box.BackgroundTransparency = 0.7
+                    Box.Name = "EspBox"
+                    Box.Parent = Camera
+                end
+            end
+        end
     end
-    Stats.fps = Stats.fps * 0.9 + (1 / math.max(dt, 0.001)) * 0.1
-end)
-
--- ============================================================ drawing (tudo em pcall)
-
-local D = {}          -- nós nomeados
-local nodes = {}
-local draw_ready = false
-
-local function safe_new(kind)
-    if not HAS_DRAW then return nil end
-    local ok, obj = pcall(function() return Drawing.new(kind) end)
-    if not ok or not obj then return nil end
-    pcall(function()
-        obj.Visible = false
-        obj.Thickness = 1
-        obj.Transparency = 1
-    end)
-    return obj
 end
 
-local function setup_drawing()
-    local rect  = safe_new("Square")
-    local text  = safe_new("Text")
-    local line  = safe_new("Line")
-    local circ  = safe_new("Circle")
-    if not (rect and text and line) then
-        log("Drawing incompleto: rect=", tostring(rect ~= nil), "text=", tostring(text ~= nil),
-            "line=", tostring(line ~= nil))
-        return false
-    end
-
-    local function add(o)
-        if not o then return nil end
-        local n = { o = o }
-        nodes[#nodes + 1] = n
-        return n
-    end
-
-    D.panel   = add(safe_new("Square"))
-    D.header  = add(safe_new("Square"))
-    D.stripe  = add(safe_new("Square"))
-    D.title   = add(safe_new("Text"))
-    D.sub     = add(safe_new("Text"))
-    D.status  = add(safe_new("Text"))
-    D.fov     = circ and add(circ)
-    draw_ready = true
-    return true
+-- ==========================================
+-- LÓGICA DE SPEED
+-- ==========================================
+-- Nota: Speed real altera a velocidade de movimento local.
+-- Para ser "bypass", o ideal é alterar apenas o cliente e ter um pequeno delay na aplicação.
+local function ApplySpeed()
+    if not Settings.SpeedEnabled or not HumanoidRootPart then return end
+    
+    -- Cria uma cópia da posição anterior
+    local OldPos = HumanoidRootPart.CFrame
+    
+    -- Move a parte de forma suave para simular velocidade, sem mudar o CFrame do jogo original
+    -- Isso ajuda a enganar alguns detectores simples, mas avançados ainda vão flaggar.
+    local ForwardVector = HumanoidRootPart.CFrame.LookVector
+    local NewPos = HumanoidRootPart.Position + (ForwardVector * (Settings.SpeedMultiplier - 1))
+    
+    HumanoidRootPart.Position = NewPos
+    HumanoidRootPart.Velocity = (HumanoidRootPart.Velocity * Settings.SpeedMultiplier)
 end
 
-local function see(n) if n and not n.v then n.o.Visible = true; n.v = true end end
-local function unsee(n) if n and n.v then n.o.Visible = false; n.v = false end end
-local function tint(n, c) if n and n.c ~= c then n.o.Color = c; n.c = c end end
-
-local function put_rect(n, x, y, w, h)
-    if not n then return end
-    x, y, w, h = iround(x), iround(y), math.max(1, iround(w)), math.max(1, iround(h))
-    if n.x ~= x or n.y ~= y or n.w ~= w or n.h ~= h then
-        pcallsafe(function()
-            n.o.Position = Vector2.new(x, y)
-            n.o.Size = Vector2.new(w, h)
-        end)
-        n.x, n.y, n.w, n.h = x, y, w, h
-    end
-    see(n)
-end
-
-local function put_text(n, x, y, s)
-    if not n then return end
-    x, y = iround(x), iround(y)
-    if n.x ~= x or n.y ~= y then
-        pcallsafe(function() n.o.Position = Vector2.new(x, y) end)
-        n.x, n.y = x, y
-    end
-    if n.t ~= s then
-        pcallsafe(function() n.o.Text = s end)
-        n.t = s
-    end
-    see(n)
-end
-
-function pcallsafe(f) pcall(f) end
-
-log("entrando na GUI")
-setup_drawing()
-
--- painel mínimo: só desenha se o Drawing aguentou
-local gui = { open = true, x = 120, y = 120 }
+-- ==========================================
+-- LOOP PRINCIPAL
+-- ==========================================
 RunService.RenderStepped:Connect(function()
-    if not draw_ready then return end
-    pcallsafe(function()
-        if not gui.open then
-            for _, n in pairs(D) do unsee(n) end
-            return
-        end
-        tint(D.panel, Color3.fromRGB(12, 10, 18))
-        tint(D.header, Color3.fromRGB(22, 18, 32))
-        tint(D.stripe, Color3.fromRGB(244, 63, 94))
-        put_rect(D.panel, gui.x, gui.y, 320, 120)
-        put_rect(D.header, gui.x, gui.y, 320, 34)
-        put_rect(D.stripe, gui.x, gui.y, 3, 120)
-        tint(D.title, Color3.fromRGB(244, 238, 248))
-        tint(D.sub, Color3.fromRGB(253, 205, 211))
-        tint(D.status, Color3.fromRGB(150, 132, 168))
-        put_text(D.title, gui.x + 14, gui.y + 7, "ZEROSUITE")
-        put_text(D.sub, gui.x + 14, gui.y + 40, "rivals · " .. EXEC)
-        put_text(D.status, gui.x + 14, gui.y + 62,
-            string.format("alvo: %s   fps: %d", Stats.target, iround(Stats.fps)))
-        put_text(D.status, gui.x + 14, gui.y + 84,
-            string.format("%s abre/fecha · %s mira · %s panic", "RShift", CFG.aim_key.Name, "F8"))
-    end)
-end)
-
-UIS.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if input.KeyCode == CFG.menu_key then
-        gui.open = not gui.open
-    elseif input.KeyCode == CFG.panic_key then
-        for _, n in ipairs(nodes) do pcall(function() n.o:Remove() end) end
-        genv().rivals = nil
-        log("panic: script descarregado")
+    -- Lógica do Painel
+    if AimbotBox and AimbotBox.Selected then
+        ApplyAimbot()
+    end
+    
+    if EspBox and EspBox.Selected then
+        DrawEsp()
+    end
+    
+    if SpeedBox and SpeedBox.Selected then
+        ApplySpeed()
     end
 end)
 
-genv().rivals = {
-    cfg = CFG, stats = Stats,
-    unload = function()
-        for _, n in ipairs(nodes) do pcall(function() n.o:Remove() end) end
-        genv().rivals = nil
-    end,
-}
+-- Ajuste de Sensibilidade do Mouse
+Mouse.Sensitivity = Settings.MouseSensitivity
 
-log("pronto · drawing =", tostring(draw_ready), "· aim =", tostring(CFG.aim))
+print("Bot Painel Iniciado com Sucesso!")
