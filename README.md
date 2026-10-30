@@ -166,11 +166,12 @@ local aim = {
 	held = false,
 	toggled = false,
 	fov = 150,
-	speed = 45,                 -- 100 = snap
+	speed = 70,                 -- 100 = snap
+	stick = 130,                -- % do FOV onde o lock continua preso
 	max_dist = 600,
 	part = "Head",
 	priority = "Crosshair",     -- Crosshair | Nearest
-	prediction = 0,             -- 0..100 -> 0..1s de lead
+	prediction = 0,
 	lock = true,
 	team = false,
 	wall = false,
@@ -528,7 +529,6 @@ local function hold_button(parent, label, down, up)
 	return b
 end
 
--- picker de tecla: clica, aperta a tecla, bindou.
 local function keybind(parent, label, default, cb)
 	local row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 34),
@@ -554,23 +554,23 @@ local function keybind(parent, label, default, cb)
 
 	local current = default
 	local conn
-	local function stop(bind_new)
+	local function stop()
 		if conn then conn:Disconnect(); conn = nil end
 		binding_active = false
-		btn.Text = bind_new and current.Name or current.Name
+		btn.Text = current.Name
 		btn.TextColor3 = COL.accent
 	end
 
 	btn.MouseButton1Click:Connect(function()
-		if conn then stop(false); return end
+		if conn then stop(); return end
 		binding_active = true
 		btn.Text = "apertar tecla"
 		btn.TextColor3 = COL.text
 		conn = UIS.InputBegan:Connect(function(input)
 			if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-			if input.KeyCode == Enum.KeyCode.Escape then stop(false); return end
+			if input.KeyCode == Enum.KeyCode.Escape then stop(); return end
 			current = input.KeyCode
-			stop(true)
+			stop()
 			if cb then cb(current) end
 		end)
 	end)
@@ -603,7 +603,8 @@ end)
 
 section(aim_page, "tuning")
 slider(aim_page, "FOV", 40, 400, 150, 5, function(v) aim.fov = v end)
-slider(aim_page, "Aim speed (100 = snap)", 1, 100, 45, 1, function(v) aim.speed = v end)
+slider(aim_page, "Aim speed (100 = snap)", 1, 100, 70, 1, function(v) aim.speed = v end)
+slider(aim_page, "Stickiness", 100, 200, 130, 5, function(v) aim.stick = v end)
 slider(aim_page, "Max distance", 50, 2000, 600, 50, function(v) aim.max_dist = v end)
 slider(aim_page, "Prediction", 0, 100, 0, 1, function(v) aim.prediction = v end)
 cycle(aim_page, "Target part", { "Head", "Torso" }, 1, function(v) aim.part = v end)
@@ -680,7 +681,9 @@ end
 
 local function predict_at(part)
 	if aim.prediction <= 0 then return part.Position end
-	local v = part.AssemblyLinearVelocity
+	local char = part.Parent
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local v = (hrp and hrp.AssemblyLinearVelocity) or part.AssemblyLinearVelocity
 	if not v then v = part.Velocity end
 	if not v or v.Magnitude < 0.5 then return part.Position end
 	return part.Position + v * (aim.prediction / 100)
@@ -742,16 +745,20 @@ local function keep_locked()
 	if not hum or hum.Health <= 0 then locked = nil; return nil end
 	local cam = Workspace.CurrentCamera
 	if not cam then locked = nil; return nil end
-	if not char:FindFirstChild("Head") and not locked:IsDescendantOf(char) then locked = nil; return nil end
+
 	local pos = predict_at(locked)
 	local sd = screen_dist(cam, pos)
-	if not sd or sd > aim.fov * 1.2 then locked = nil; return nil end
+	if not sd or sd > aim.fov * (aim.stick / 100) then locked = nil; return nil end
 	if (cam.CFrame.Position - pos).Magnitude > aim.max_dist * 1.2 then locked = nil; return nil end
 	if aim.wall and not visible_from_cam(pos, char) then locked = nil; return nil end
 	return locked
 end
 
-bind(RunService.RenderStepped, function(dt)
+-- rotação própria, acumulada entre frames: o módulo de câmera reescreve a
+-- câmera todo frame, então lerp em cima do valor dele nunca gruda.
+local aim_rot = nil
+
+local function cam_step(dt)
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
 
@@ -763,19 +770,34 @@ bind(RunService.RenderStepped, function(dt)
 	end
 
 	if not aim_active() then
+		aim_rot = nil
 		locked = nil
 		return
 	end
 
 	local part = (aim.lock and keep_locked()) or acquire()
 	if aim.lock then locked = part end
-	if not part then return end
+	if not part then
+		aim_rot = nil
+		return
+	end
+
+	if not aim_rot then
+		aim_rot = cam.CFrame - cam.CFrame.Position
+	end
 
 	local goal = CFrame.lookAt(cam.CFrame.Position, predict_at(part))
+	local goal_rot = goal - goal.Position
+
 	local base = math.clamp(aim.speed / 100, 0.01, 1)
-	local alpha = 1 - math.pow(1 - base, dt * 60)
-	cam.CFrame = cam.CFrame:Lerp(goal, math.clamp(alpha, 0, 1))
-end)
+	local alpha = (base >= 1) and 1 or (1 - math.pow(1 - base, dt * 60))
+
+	aim_rot = aim_rot:Lerp(goal_rot, alpha)
+	cam.CFrame = CFrame.new(cam.CFrame.Position) * aim_rot
+end
+
+local cam_bind_name = "ZN_CAM_" .. tostring(math.random(1000000, 9999999))
+RunService:BindToRenderStep(cam_bind_name, Enum.RenderPriority.Camera.Value + 1, cam_step)
 
 bind(UIS.InputBegan, function(input, processed)
 	if processed or binding_active then return end
@@ -1498,6 +1520,7 @@ end)
 LP.CharacterAdded:Connect(function()
 	fly.vert = 0
 	aim.held = false
+	aim_rot = nil
 	locked = nil
 end)
 
@@ -1510,6 +1533,7 @@ function unload_dummy()
 	for _, d in ipairs(DRAW) do pcall(function() d:Remove() end) end
 	for i = #DRAW, 1, -1 do DRAW[i] = nil end
 	for p, e in pairs(esp_cache) do esp_drop(e); esp_cache[p] = nil end
+	pcall(function() RunService:UnbindFromRenderStep(cam_bind_name) end)
 	pcall(function() set_kick_guard(false) end)
 	pcall(function() gui:Destroy() end)
 	if type(getgenv) == "function" then getgenv().ZERO_CLEANUP = nil end
@@ -1520,4 +1544,4 @@ if type(getgenv) == "function" then
 end
 
 select_page(aim_page)
-print("[ZERO] hub v2 carregado")
+print("[ZERO] hub v3 carregado")
