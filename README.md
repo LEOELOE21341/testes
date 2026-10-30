@@ -166,17 +166,20 @@ local aim = {
 	held = false,
 	toggled = false,
 	fov = 150,
-	speed = 70,                 -- 100 = snap
-	stick = 130,                -- % do FOV onde o lock continua preso
+	speed = 80,                 -- 100 = snap
+	stick = 130,
 	max_dist = 600,
 	part = "Head",
-	priority = "Crosshair",     -- Crosshair | Nearest
+	priority = "Crosshair",
 	prediction = 0,
 	lock = true,
 	team = false,
 	wall = false,
 	show_fov = true,
 }
+local aim_rot = nil
+local locked = nil
+
 local esp = {
 	enabled = false, box = true, name = true, health = true,
 	dist = true, tracer = false, team = false, max_dist = 900,
@@ -529,6 +532,8 @@ local function hold_button(parent, label, down, up)
 	return b
 end
 
+-- picker com watchdog: se ninguém apertar tecla em 5s, cancela sozinho e
+-- devolve o estado. sem isso o binding_active fica travado e mata os binds.
 local function keybind(parent, label, default, cb)
 	local row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 34),
@@ -573,6 +578,9 @@ local function keybind(parent, label, default, cb)
 			stop()
 			if cb then cb(current) end
 		end)
+		task.delay(5, function()
+			if conn then stop() end
+		end)
 	end)
 	return function() return current end
 end
@@ -587,6 +595,19 @@ local refresh_aim_btn = function() end
 local aim_active
 
 section(aim_page, "aimbot")
+
+local status = new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 28),
+	BackgroundColor3 = COL.panel2,
+	Text = "aim: off",
+	Font = Enum.Font.GothamBold, TextSize = 11,
+	TextColor3 = COL.dim,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	LayoutOrder = next_order(aim_page),
+}, aim_page)
+corner(status, 8)
+new("UIPadding", { PaddingLeft = UDim.new(0, 10) }, status)
+
 toggle(aim_page, "Enabled", false, function(v)
 	aim.enabled = v
 	aim.held = false
@@ -603,7 +624,7 @@ end)
 
 section(aim_page, "tuning")
 slider(aim_page, "FOV", 40, 400, 150, 5, function(v) aim.fov = v end)
-slider(aim_page, "Aim speed (100 = snap)", 1, 100, 70, 1, function(v) aim.speed = v end)
+slider(aim_page, "Aim speed (100 = snap)", 1, 100, 80, 1, function(v) aim.speed = v end)
 slider(aim_page, "Stickiness", 100, 200, 130, 5, function(v) aim.stick = v end)
 slider(aim_page, "Max distance", 50, 2000, 600, 50, function(v) aim.max_dist = v end)
 slider(aim_page, "Prediction", 0, 100, 0, 1, function(v) aim.prediction = v end)
@@ -684,7 +705,10 @@ local function predict_at(part)
 	local char = part.Parent
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	local v = (hrp and hrp.AssemblyLinearVelocity) or part.AssemblyLinearVelocity
-	if not v then v = part.Velocity end
+	if not v then
+		local ok, raw = pcall(function() return part.Velocity end)
+		v = ok and raw or nil
+	end
 	if not v or v.Magnitude < 0.5 then return part.Position end
 	return part.Position + v * (aim.prediction / 100)
 end
@@ -705,8 +729,6 @@ local function screen_dist(cam, pos)
 	if not on or sp.Z <= 0 then return nil end
 	return (Vector2.new(sp.X, sp.Y) - Vector2.new(vp.X / 2, vp.Y / 2)).Magnitude
 end
-
-local locked = nil
 
 local function acquire()
 	local cam = Workspace.CurrentCamera
@@ -754,11 +776,14 @@ local function keep_locked()
 	return locked
 end
 
--- rotação própria, acumulada entre frames: o módulo de câmera reescreve a
--- câmera todo frame, então lerp em cima do valor dele nunca gruda.
-local aim_rot = nil
+local function aim_apply()
+	local cam = Workspace.CurrentCamera
+	if not cam or not aim_rot then return end
+	cam.CFrame = CFrame.new(cam.CFrame.Position) * aim_rot
+end
 
-local function cam_step(dt)
+local aim_err_shown = false
+local function aim_step(dt)
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
 
@@ -793,11 +818,49 @@ local function cam_step(dt)
 	local alpha = (base >= 1) and 1 or (1 - math.pow(1 - base, dt * 60))
 
 	aim_rot = aim_rot:Lerp(goal_rot, alpha)
-	cam.CFrame = CFrame.new(cam.CFrame.Position) * aim_rot
+	aim_apply()
 end
 
+local status_acc = 0
+bind(RunService.RenderStepped, function(dt)
+	local ok, err = pcall(aim_step, dt)
+	if not ok and not aim_err_shown then
+		aim_err_shown = true
+		warn("[ZERO] aim: " .. tostring(err))
+	end
+
+	status_acc = status_acc + dt
+	if status_acc < 0.2 then return end
+	status_acc = 0
+	if not aim.enabled then
+		status.Text = "aim: off"
+	elseif aim_active() then
+		local ch = locked and locked.Parent
+		if ch then
+			status.Text = "aim: LOCKED · " .. ch.Name
+			status.TextColor3 = COL.accent
+		else
+			status.Text = "aim: on · sem alvo no FOV"
+			status.TextColor3 = COL.accent2
+		end
+	else
+		status.Text = "aim: on · " .. aim.mode .. " (esperando)"
+		status.TextColor3 = COL.dim
+	end
+end)
+
+-- reaplica depois do módulo de câmera. se o executor não deixar, o
+-- RenderStepped acima já fez o serviço — nada quebra.
 local cam_bind_name = "ZN_CAM_" .. tostring(math.random(1000000, 9999999))
-RunService:BindToRenderStep(cam_bind_name, Enum.RenderPriority.Camera.Value + 1, cam_step)
+pcall(function()
+	RunService:BindToRenderStep(cam_bind_name, Enum.RenderPriority.Last.Value - 1, function()
+		local ok, err = pcall(aim_apply)
+		if not ok and not aim_err_shown then
+			aim_err_shown = true
+			warn("[ZERO] cam: " .. tostring(err))
+		end
+	end)
+end)
 
 bind(UIS.InputBegan, function(input, processed)
 	if processed or binding_active then return end
@@ -1037,7 +1100,7 @@ bind(RunService.RenderStepped, function(dt)
 end)
 
 --========================================================================
--- FLY  (CFrame puro — nenhuma instância criada)
+-- FLY
 --========================================================================
 local fly_page = make_page(3)
 make_tab("FLY", 3, fly_page)
@@ -1109,7 +1172,7 @@ bind(RunService.RenderStepped, function(dt)
 end)
 
 --========================================================================
--- BLINK  (teleporta pro ponto da mira)
+-- BLINK
 --========================================================================
 local blink_last = 0
 
@@ -1544,4 +1607,4 @@ if type(getgenv) == "function" then
 end
 
 select_page(aim_page)
-print("[ZERO] hub v3 carregado")
+print("[ZERO] hub v4 carregado")
