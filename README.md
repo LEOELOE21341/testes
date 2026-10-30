@@ -1,8 +1,8 @@
 --=====================================================================
 -- ZERO // universal hub
 -- language: Lua (Luau) | target: Roblox client | env: Xeno (Android/Win)
--- modules: aimbot | esp | fly | teleport book | protection | unload
--- no RemoteEvents fired. aim/esp are render-side only = zero server footprint.
+-- modules: aimbot | esp | fly | blink | teleport book | protection
+-- no RemoteEvents fired. aim/esp/blink are client-side only.
 --=====================================================================
 
 if type(getgenv) == "function" and type(getgenv().ZERO_CLEANUP) == "function" then
@@ -94,8 +94,8 @@ local function next_order(parent)
 	return ORD[parent]
 end
 
--- drag: MouseMovement chega em InputObject novo, nunca no mesmo do InputBegan.
--- por isso o estado é só o booleano, sem comparar objeto de input.
+local binding_active = false
+
 local function draggable(frame, handle, scale_get)
 	local drag, start, start_pos, start_abs = false, nil, nil, nil
 
@@ -121,7 +121,6 @@ local function draggable(frame, handle, scale_get)
 		local raw = Vector2.new(input.Position.X, input.Position.Y) - start
 		local target = start_abs + raw
 
-		-- trava: pelo menos 60px de largura e o cabeçalho sempre alcançáveis
 		local x = math.clamp(target.X, -(size.X - 60), vp.X - 60)
 		local y = math.clamp(target.Y, 36, vp.Y - 46)
 
@@ -161,23 +160,43 @@ end
 -- STATE
 --========================================================================
 local aim = {
-	enabled = false, held = false, fov = 150, smooth = 4,
-	part = "Head", team = false, wall = false, show_fov = true,
+	enabled = false,
+	mode = "Toggle",            -- Toggle | Hold | Always
 	key = Enum.KeyCode.E,
+	held = false,
+	toggled = false,
+	fov = 150,
+	speed = 45,                 -- 100 = snap
+	max_dist = 600,
+	part = "Head",
+	priority = "Crosshair",     -- Crosshair | Nearest
+	prediction = 0,             -- 0..100 -> 0..1s de lead
+	lock = true,
+	team = false,
+	wall = false,
+	show_fov = true,
 }
 local esp = {
 	enabled = false, box = true, name = true, health = true,
 	dist = true, tracer = false, team = false, max_dist = 900,
 }
-local fly  = { enabled = false, speed = 90, vert = 0 }
+local fly = { enabled = false, speed = 90, vert = 0 }
+local blink = {
+	enabled = true,
+	key = Enum.KeyCode.G,
+	range = 400,
+	offset = 3,
+	from_mouse = not UIS.TouchEnabled,
+	step = false,
+}
 local misc = { antiafk = false }
-local tp   = { step = false, list = {}, file = "zero_teleports.json" }
+local tp = { step = false, list = {}, file = "zero_teleports.json" }
 
 --========================================================================
 -- MAIN WINDOW
 --========================================================================
 local win = new("Frame", {
-	Size = UDim2.fromOffset(540, 392),
+	Size = UDim2.fromOffset(540, 404),
 	Position = UDim2.new(0.5, 0, 0.5, 0),
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	BackgroundColor3 = COL.bg,
@@ -207,7 +226,7 @@ new("TextLabel", {
 	TextSize = 10, TextColor3 = COL.dim, TextXAlignment = Enum.TextXAlignment.Left,
 }, header)
 
-local unload_dummy -- forward: atribuído no fim
+local unload_dummy
 
 local dock = new("TextButton", {
 	Size = UDim2.fromOffset(52, 52),
@@ -233,7 +252,6 @@ hdr_button(header, "×", -36, function()
 	if unload_dummy then unload_dummy() end
 end)
 
--- sidebar
 local side = new("Frame", {
 	Size = UDim2.new(0, 116, 1, -64),
 	Position = UDim2.new(0, 14, 0, 52),
@@ -406,14 +424,12 @@ local function slider(parent, label, min, max, default, step, cb)
 	}, hit)
 	corner(knob, 6)
 
-	local value = default
 	local function apply(v, fire)
 		v = math.clamp(v, min, max)
 		if step and step > 0 then
 			v = math.floor((v - min) / step + 0.5) * step + min
 		end
 		v = math.clamp(v, min, max)
-		value = v
 		local a = (v - min) / (max - min)
 		fill.Size = UDim2.new(a, 0, 1, 0)
 		knob.Position = UDim2.new(a, 0, 0.5, 0)
@@ -512,24 +528,89 @@ local function hold_button(parent, label, down, up)
 	return b
 end
 
+-- picker de tecla: clica, aperta a tecla, bindou.
+local function keybind(parent, label, default, cb)
+	local row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundColor3 = COL.panel,
+		LayoutOrder = next_order(parent),
+	}, parent)
+	corner(row, 8)
+	new("TextLabel", {
+		Size = UDim2.new(1, -120, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+		BackgroundTransparency = 1, Text = label,
+		Font = Enum.Font.GothamMedium, TextSize = 13,
+		TextColor3 = COL.text, TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local btn = new("TextButton", {
+		Size = UDim2.new(0, 100, 0, 24),
+		Position = UDim2.new(1, -110, 0.5, -12),
+		BackgroundColor3 = COL.panel2,
+		Text = default.Name,
+		Font = Enum.Font.GothamBold, TextSize = 11,
+		TextColor3 = COL.accent, AutoButtonColor = false,
+	}, row)
+	corner(btn, 6)
+
+	local current = default
+	local conn
+	local function stop(bind_new)
+		if conn then conn:Disconnect(); conn = nil end
+		binding_active = false
+		btn.Text = bind_new and current.Name or current.Name
+		btn.TextColor3 = COL.accent
+	end
+
+	btn.MouseButton1Click:Connect(function()
+		if conn then stop(false); return end
+		binding_active = true
+		btn.Text = "apertar tecla"
+		btn.TextColor3 = COL.text
+		conn = UIS.InputBegan:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+			if input.KeyCode == Enum.KeyCode.Escape then stop(false); return end
+			current = input.KeyCode
+			stop(true)
+			if cb then cb(current) end
+		end)
+	end)
+	return function() return current end
+end
+
 --========================================================================
 -- AIMBOT
 --========================================================================
 local aim_page = make_page(1)
 make_tab("AIMBOT", 1, aim_page)
 
+local refresh_aim_btn = function() end
+local aim_active
+
 section(aim_page, "aimbot")
-local aim_btn_visible
 toggle(aim_page, "Enabled", false, function(v)
 	aim.enabled = v
-	if aim_btn_visible then aim_btn_visible(v) end
+	aim.held = false
+	aim.toggled = false
+	refresh_aim_btn()
 end)
-cycle(aim_page, "Aim key", { "E", "Q", "F", "C", "V", "T" }, 1, function(v)
-	aim.key = Enum.KeyCode[v]
+keybind(aim_page, "Aim key", aim.key, function(k) aim.key = k end)
+cycle(aim_page, "Mode", { "Toggle", "Hold", "Always" }, 1, function(v)
+	aim.mode = v
+	aim.held = false
+	aim.toggled = false
+	refresh_aim_btn()
 end)
-slider(aim_page, "FOV (px)", 40, 400, 150, 5, function(v) aim.fov = v end)
-slider(aim_page, "Smooth (1 = snap)", 1, 20, 4, 1, function(v) aim.smooth = v end)
+
+section(aim_page, "tuning")
+slider(aim_page, "FOV", 40, 400, 150, 5, function(v) aim.fov = v end)
+slider(aim_page, "Aim speed (100 = snap)", 1, 100, 45, 1, function(v) aim.speed = v end)
+slider(aim_page, "Max distance", 50, 2000, 600, 50, function(v) aim.max_dist = v end)
+slider(aim_page, "Prediction", 0, 100, 0, 1, function(v) aim.prediction = v end)
 cycle(aim_page, "Target part", { "Head", "Torso" }, 1, function(v) aim.part = v end)
+cycle(aim_page, "Priority", { "Crosshair", "Nearest" }, 1, function(v) aim.priority = v end)
+
+section(aim_page, "filters")
+toggle(aim_page, "Target lock", true, function(v) aim.lock = v end)
 toggle(aim_page, "Team check", false, function(v) aim.team = v end)
 toggle(aim_page, "Wall check (raycast)", false, function(v) aim.wall = v end)
 toggle(aim_page, "Show FOV circle", true, function(v) aim.show_fov = v end)
@@ -538,22 +619,38 @@ local aim_button = new("TextButton", {
 	Size = UDim2.fromOffset(68, 68),
 	Position = UDim2.new(1, -92, 1, -104),
 	BackgroundColor3 = COL.panel,
-	BackgroundTransparency = 0.2,
+	BackgroundTransparency = 0.15,
 	Text = "AIM",
 	Font = Enum.Font.GothamBold, TextSize = 12,
 	TextColor3 = COL.text, AutoButtonColor = false, Visible = false,
 }, gui)
 corner(aim_button, 34)
 outline(aim_button, COL.accent, 1, 0.4)
-aim_btn_visible = function(v) aim_button.Visible = v end
+
+aim_active = function()
+	if not aim.enabled then return false end
+	if aim.mode == "Always" then return true end
+	if aim.mode == "Hold" then return aim.held end
+	return aim.toggled
+end
+
+refresh_aim_btn = function()
+	aim_button.Visible = aim.enabled and aim.mode ~= "Always"
+	aim_button.BackgroundColor3 = aim_active() and COL.accent or COL.panel
+end
 
 aim_button.MouseButton1Down:Connect(function()
-	aim.held = true
-	Tween:Create(aim_button, TweenInfo.new(0.08), { BackgroundColor3 = COL.accent }):Play()
+	if not aim.enabled then return end
+	if aim.mode == "Hold" then
+		aim.held = true
+	elseif aim.mode == "Toggle" then
+		aim.toggled = not aim.toggled
+	end
+	refresh_aim_btn()
 end)
 aim_button.MouseButton1Up:Connect(function()
-	aim.held = false
-	Tween:Create(aim_button, TweenInfo.new(0.08), { BackgroundColor3 = COL.panel }):Play()
+	if aim.mode == "Hold" then aim.held = false end
+	refresh_aim_btn()
 end)
 
 local fov_circle
@@ -571,8 +668,8 @@ if DrawingLib then
 	end
 end
 
-local ray_params = RaycastParams.new()
-ray_params.FilterType = Enum.RaycastFilterType.Exclude
+local vis_params = RaycastParams.new()
+vis_params.FilterType = Enum.RaycastFilterType.Exclude
 
 local function target_part(char)
 	if aim.part == "Head" then return char:FindFirstChild("Head") end
@@ -581,39 +678,53 @@ local function target_part(char)
 		or char:FindFirstChild("HumanoidRootPart")
 end
 
-local function is_visible(from, part)
-	local exclude = {}
-	if LP.Character then exclude[#exclude + 1] = LP.Character end
-	exclude[#exclude + 1] = part.Parent
-	ray_params.FilterDescendantsInstances = exclude
-	return Workspace:Raycast(from, part.Position - from, ray_params) == nil
+local function predict_at(part)
+	if aim.prediction <= 0 then return part.Position end
+	local v = part.AssemblyLinearVelocity
+	if not v then v = part.Velocity end
+	if not v or v.Magnitude < 0.5 then return part.Position end
+	return part.Position + v * (aim.prediction / 100)
 end
 
-local function best_target()
+local function visible_from_cam(pos, char)
+	local cam = Workspace.CurrentCamera
+	if not cam then return false end
+	local ex = {}
+	if LP.Character then ex[#ex + 1] = LP.Character end
+	if char then ex[#ex + 1] = char end
+	vis_params.FilterDescendantsInstances = ex
+	return Workspace:Raycast(cam.CFrame.Position, pos - cam.CFrame.Position, vis_params) == nil
+end
+
+local function screen_dist(cam, pos)
+	local vp = cam.ViewportSize
+	local sp, on = cam:WorldToViewportPoint(pos)
+	if not on or sp.Z <= 0 then return nil end
+	return (Vector2.new(sp.X, sp.Y) - Vector2.new(vp.X / 2, vp.Y / 2)).Magnitude
+end
+
+local locked = nil
+
+local function acquire()
 	local cam = Workspace.CurrentCamera
 	if not cam then return nil end
-	local vp = cam.ViewportSize
-	local center = Vector2.new(vp.X / 2, vp.Y / 2)
 	local origin = cam.CFrame.Position
-	local best, best_d = nil, nil
+	local best, best_score = nil, nil
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= LP then
-			local skip = false
-			if aim.team and p.Team ~= nil and LP.Team ~= nil and p.Team == LP.Team then
-				skip = true
-			end
 			local char = p.Character
-			if not skip and char then
-				local hum = char:FindFirstChildOfClass("Humanoid")
-				local part = target_part(char)
-				if hum and part and hum.Health > 0 then
-					local sp, on = cam:WorldToViewportPoint(part.Position)
-					if on and sp.Z > 0 then
-						local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-						if d <= aim.fov and (not best_d or d < best_d) then
-							if not aim.wall or is_visible(origin, part) then
-								best, best_d = part, d
-							end
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local part = char and target_part(char)
+			local skip = aim.team and p.Team ~= nil and LP.Team ~= nil and p.Team == LP.Team
+			if not skip and char and hum and hum.Health > 0 and part then
+				local pos = predict_at(part)
+				local dist = (origin - pos).Magnitude
+				local sd = screen_dist(cam, pos)
+				if sd and sd <= aim.fov and dist <= aim.max_dist then
+					if not aim.wall or visible_from_cam(pos, char) then
+						local score = (aim.priority == "Nearest") and dist or sd
+						if not best_score or score < best_score then
+							best, best_score = part, score
 						end
 					end
 				end
@@ -621,6 +732,23 @@ local function best_target()
 		end
 	end
 	return best
+end
+
+local function keep_locked()
+	if not locked then return nil end
+	local char = locked.Parent
+	if not char or not char:IsA("Model") then locked = nil; return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then locked = nil; return nil end
+	local cam = Workspace.CurrentCamera
+	if not cam then locked = nil; return nil end
+	if not char:FindFirstChild("Head") and not locked:IsDescendantOf(char) then locked = nil; return nil end
+	local pos = predict_at(locked)
+	local sd = screen_dist(cam, pos)
+	if not sd or sd > aim.fov * 1.2 then locked = nil; return nil end
+	if (cam.CFrame.Position - pos).Magnitude > aim.max_dist * 1.2 then locked = nil; return nil end
+	if aim.wall and not visible_from_cam(pos, char) then locked = nil; return nil end
+	return locked
 end
 
 bind(RunService.RenderStepped, function(dt)
@@ -634,21 +762,37 @@ bind(RunService.RenderStepped, function(dt)
 		fov_circle.Visible = aim.enabled and aim.show_fov
 	end
 
-	if not (aim.enabled and aim.held) then return end
-	local part = best_target()
+	if not aim_active() then
+		locked = nil
+		return
+	end
+
+	local part = (aim.lock and keep_locked()) or acquire()
+	if aim.lock then locked = part end
 	if not part then return end
 
-	local goal = CFrame.lookAt(cam.CFrame.Position, part.Position)
-	local alpha = 1 - math.pow(1 - (1 / math.max(aim.smooth, 1)), dt * 60)
+	local goal = CFrame.lookAt(cam.CFrame.Position, predict_at(part))
+	local base = math.clamp(aim.speed / 100, 0.01, 1)
+	local alpha = 1 - math.pow(1 - base, dt * 60)
 	cam.CFrame = cam.CFrame:Lerp(goal, math.clamp(alpha, 0, 1))
 end)
 
 bind(UIS.InputBegan, function(input, processed)
-	if processed then return end
-	if aim.enabled and input.KeyCode == aim.key then aim.held = true end
+	if processed or binding_active then return end
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if not aim.enabled or input.KeyCode ~= aim.key then return end
+	if aim.mode == "Hold" then
+		aim.held = true
+	elseif aim.mode == "Toggle" then
+		aim.toggled = not aim.toggled
+	end
+	refresh_aim_btn()
 end)
 bind(UIS.InputEnded, function(input)
-	if input.KeyCode == aim.key then aim.held = false end
+	if input.KeyCode == aim.key and aim.mode == "Hold" then
+		aim.held = false
+		refresh_aim_btn()
+	end
 end)
 
 --========================================================================
@@ -871,7 +1015,7 @@ bind(RunService.RenderStepped, function(dt)
 end)
 
 --========================================================================
--- FLY  (CFrame puro — nenhuma instância criada, nada pra scanner achar)
+-- FLY  (CFrame puro — nenhuma instância criada)
 --========================================================================
 local fly_page = make_page(3)
 make_tab("FLY", 3, fly_page)
@@ -901,7 +1045,7 @@ end, function()
 end)
 dn_btn.Position = UDim2.new(0.52, 0, 0, 0)
 
-local fly_note = new("TextLabel", {
+new("TextLabel", {
 	Size = UDim2.new(1, 0, 0, 30),
 	BackgroundTransparency = 1,
 	Text = "thumbstick/WASD move · ▲▼ or Space/LShift vertical",
@@ -943,6 +1087,96 @@ bind(RunService.RenderStepped, function(dt)
 end)
 
 --========================================================================
+-- BLINK  (teleporta pro ponto da mira)
+--========================================================================
+local blink_last = 0
+
+local function blink_go()
+	if not blink.enabled then return end
+	local now = os.clock()
+	if now - blink_last < 0.25 then return end
+	blink_last = now
+
+	local cam = Workspace.CurrentCamera
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not cam or not hrp then return end
+
+	local origin, dir
+	if blink.from_mouse then
+		local m = UIS:GetMouseLocation()
+		local ray = cam:ViewportPointToRay(m.X, m.Y)
+		origin, dir = ray.Origin, ray.Direction
+	else
+		origin, dir = cam.CFrame.Position, cam.CFrame.LookVector
+	end
+	dir = dir.Unit * blink.range
+
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = { char }
+	rp.IgnoreWater = true
+	local hit = Workspace:Raycast(origin, dir, rp)
+
+	local dest
+	if hit then
+		dest = hit.Position + hit.Normal * blink.offset
+	else
+		dest = origin + dir
+	end
+
+	local rot = hrp.CFrame - hrp.CFrame.Position
+
+	if blink.step then
+		local start = hrp.CFrame.Position
+		local total = (dest - start).Magnitude
+		local steps = math.clamp(math.ceil(total / 35), 1, 80)
+		task.spawn(function()
+			for i = 1, steps do
+				local c = LP.Character
+				local r = c and c:FindFirstChild("HumanoidRootPart")
+				if not r then return end
+				local a = i / steps
+				local p = (i == steps) and dest or start:Lerp(dest, a)
+				pcall(function() r.CFrame = CFrame.new(p) * rot end)
+				task.wait(0.012)
+			end
+		end)
+	else
+		pcall(function() hrp.CFrame = CFrame.new(dest) * rot end)
+	end
+end
+
+local blink_page = make_page(4)
+make_tab("BLINK", 4, blink_page)
+
+section(blink_page, "teleport to aim")
+toggle(blink_page, "Enabled", true, function(v) blink.enabled = v end)
+keybind(blink_page, "Blink key", blink.key, function(k) blink.key = k end)
+
+section(blink_page, "aim point")
+slider(blink_page, "Range", 50, 2000, 400, 25, function(v) blink.range = v end)
+slider(blink_page, "Surface offset", 0, 12, 3, 1, function(v) blink.offset = v end)
+toggle(blink_page, "From mouse point", blink.from_mouse, function(v) blink.from_mouse = v end)
+toggle(blink_page, "Step mode (less flag)", false, function(v) blink.step = v end)
+button(blink_page, "TEST BLINK", blink_go)
+
+new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 44),
+	BackgroundTransparency = 1,
+	Text = "raycast sai da câmera · sem hit, cai no fim do range · offset empurra pra fora da superfície",
+	Font = Enum.Font.GothamMedium, TextSize = 10,
+	TextColor3 = COL.dim, TextWrapped = true,
+	LayoutOrder = next_order(blink_page),
+}, blink_page)
+
+bind(UIS.InputBegan, function(input, processed)
+	if processed or binding_active then return end
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if input.KeyCode == blink.key then blink_go() end
+end)
+
+--========================================================================
 -- MISC / PROTECTION
 --========================================================================
 local kick_orig = nil
@@ -958,8 +1192,8 @@ local function set_kick_guard(on)
 	end)
 end
 
-local misc_page = make_page(4)
-make_tab("MISC", 4, misc_page)
+local misc_page = make_page(5)
+make_tab("MISC", 5, misc_page)
 
 section(misc_page, "protection")
 toggle(misc_page, "Anti-AFK", false, function(v)
@@ -968,7 +1202,7 @@ end)
 toggle(misc_page, "Block client-side kick", false, set_kick_guard)
 
 section(misc_page, "session")
-local unload_btn = button(misc_page, "UNLOAD / REMOVE", function()
+button(misc_page, "UNLOAD / REMOVE", function()
 	if unload_dummy then unload_dummy() end
 end, COL.danger)
 
@@ -1001,7 +1235,7 @@ end
 tp_load()
 
 local tpw = new("Frame", {
-	Size = UDim2.fromOffset(304, 392),
+	Size = UDim2.fromOffset(304, 404),
 	Position = UDim2.new(0.5, 300, 0.5, 0),
 	AnchorPoint = Vector2.new(0, 0.5),
 	BackgroundColor3 = COL.bg,
@@ -1059,7 +1293,6 @@ local save_btn = new("TextButton", {
 }, tp_body)
 corner(save_btn, 8)
 
-local step_toggle
 do
 	local row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 32),
@@ -1093,12 +1326,11 @@ do
 		}):Play()
 	end
 	render()
-	step_toggle = function(v)
-		on = v and true or false
+	b.MouseButton1Click:Connect(function()
+		on = not on
 		tp.step = on
 		render()
-	end
-	b.MouseButton1Click:Connect(function() step_toggle(not on) end)
+	end)
 end
 
 local tp_list = new("ScrollingFrame", {
@@ -1225,7 +1457,7 @@ local tp_tab = new("TextButton", {
 	Size = UDim2.new(1, 0, 0, 36),
 	BackgroundColor3 = COL.panel,
 	Text = "", AutoButtonColor = false,
-	LayoutOrder = 5,
+	LayoutOrder = 6,
 }, side)
 corner(tp_tab, 8)
 new("Frame", {
@@ -1265,6 +1497,8 @@ end)
 
 LP.CharacterAdded:Connect(function()
 	fly.vert = 0
+	aim.held = false
+	locked = nil
 end)
 
 --========================================================================
@@ -1286,4 +1520,4 @@ if type(getgenv) == "function" then
 end
 
 select_page(aim_page)
-print("[ZERO] hub carregado")
+print("[ZERO] hub v2 carregado")
